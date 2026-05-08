@@ -8,9 +8,12 @@ COLOR_DEFAULT = '#4c8bbe'
 COLOR_DEFAULT_BORDER = '#2e6494'
 
 
-def _well_colors(wells: list, control_well: str):
-    fills = [COLOR_CONTROL if w == control_well else COLOR_DEFAULT for w in wells]
-    borders = [COLOR_CONTROL_BORDER if w == control_well else COLOR_DEFAULT_BORDER for w in wells]
+def _well_colors(wells: list, control_wells: 'str | list[str]'):
+    if isinstance(control_wells, str):
+        control_wells = [control_wells]
+    ctrl_set = set(control_wells)
+    fills   = [COLOR_CONTROL        if w in ctrl_set else COLOR_DEFAULT        for w in wells]
+    borders = [COLOR_CONTROL_BORDER if w in ctrl_set else COLOR_DEFAULT_BORDER for w in wells]
     return fills, borders
 
 
@@ -82,9 +85,10 @@ def _add_n_annotations(fig, wells: list, ns: list):
     )
 
 
-def _add_legend_annotation(fig, color: str):
+def _add_legend_annotation(fig, color: str, plural: bool = False):
+    label = 'Control wells' if plural else 'Control well'
     fig.add_annotation(
-        text=f'<span style="color:{color}">■</span> Control well',
+        text=f'<span style="color:{color}">■</span> {label}',
         xref='paper', yref='paper',
         x=1.0, y=1.04,
         showarrow=False,
@@ -95,13 +99,13 @@ def _add_legend_annotation(fig, color: str):
 
 def make_bar_figure(
     stats_df: pd.DataFrame,
-    control_well: str,
+    control_wells: 'str | list[str]',
     title: str,
     y_label: str,
 ) -> go.Figure:
     wells = stats_df['well'].tolist()
     ns = stats_df['n'].tolist()
-    fills, borders = _well_colors(wells, control_well)
+    fills, borders = _well_colors(wells, control_wells)
     ci = stats_df['ci95'].fillna(0).tolist()
 
     trace = go.Bar(
@@ -128,7 +132,8 @@ def make_bar_figure(
     fig = go.Figure(data=[trace])
     fig.update_layout(**_base_layout(title, y_label))
     _add_n_annotations(fig, wells, ns)
-    _add_legend_annotation(fig, COLOR_CONTROL)
+    plural = isinstance(control_wells, list) and len(control_wells) > 1
+    _add_legend_annotation(fig, COLOR_CONTROL, plural=plural)
     return fig
 
 
@@ -136,11 +141,11 @@ def make_violin_figure(
     df: pd.DataFrame,
     param: str,
     wells: list,
-    control_well: str,
+    control_wells: 'str | list[str]',
     title: str,
     y_label: str,
 ) -> go.Figure:
-    fills, borders = _well_colors(wells, control_well)
+    fills, borders = _well_colors(wells, control_wells)
     traces = []
     ns = []
 
@@ -168,7 +173,8 @@ def make_violin_figure(
     layout['violinmode'] = 'overlay'
     fig.update_layout(**layout)
     _add_n_annotations(fig, wells, ns)
-    _add_legend_annotation(fig, COLOR_CONTROL)
+    plural = isinstance(control_wells, list) and len(control_wells) > 1
+    _add_legend_annotation(fig, COLOR_CONTROL, plural=plural)
     return fig
 
 
@@ -176,13 +182,13 @@ def make_strip_figure(
     df: pd.DataFrame,
     param: str,
     wells: list,
-    control_well: str,
+    control_wells: 'str | list[str]',
     title: str,
     y_label: str,
     max_points: int = 500,
 ) -> go.Figure:
     rng = np.random.default_rng(seed=42)
-    fills, borders = _well_colors(wells, control_well)
+    fills, borders = _well_colors(wells, control_wells)
     traces = []
     ns = []
 
@@ -220,5 +226,6 @@ def make_strip_figure(
     layout['boxmode'] = 'overlay'
     fig.update_layout(**layout)
     _add_n_annotations(fig, wells, ns)
-    _add_legend_annotation(fig, COLOR_CONTROL)
+    plural = isinstance(control_wells, list) and len(control_wells) > 1
+    _add_legend_annotation(fig, COLOR_CONTROL, plural=plural)
     return fig

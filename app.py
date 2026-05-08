@@ -123,9 +123,10 @@ def _update_controls(auto_key, btn_key):
 # ── Shared rendering helper ───────────────────────────────────────────────────
 
 def render_analysis(
-    src_df, param, all_wells, control_well,
+    src_df, param, all_wells, control_wells,
     op_key, op_label, minmax_min_well, minmax_max_well,
     file_stem, prefix,
+    control_map=None,
 ):
     """Render plot-type selector, Raw/Normalized sub-tabs, stats expander."""
     # Recompute minmax config from src_df (important: outlier tab uses cleaned df)
@@ -137,22 +138,47 @@ def render_analysis(
     else:
         minmax_config = None
 
-    ctrl_stats = get_control_stats(src_df, control_well, param)
-    ctrl_mean  = ctrl_stats['mean']
+    df_work = src_df.copy()
 
-    if np.isnan(ctrl_mean) and op_key != 'none':
-        st.warning(
-            f"Control well **{control_well}** has no valid data for **{param}**. "
-            "Normalization cannot be applied."
-        )
+    if not control_map:
+        # Standard path: single pooled control for all wells
+        ctrl_stats = get_control_stats(src_df, control_wells, param)
+        ctrl_mean  = ctrl_stats['mean']
+        if np.isnan(ctrl_mean) and op_key != 'none':
+            st.warning(
+                f"Control well(s) **{', '.join(control_wells)}** have no valid data "
+                f"for **{param}**. Normalization cannot be applied."
+            )
+        norm_series, warn_msg = apply_normalization(df_work[param], ctrl_stats, op_key, minmax_config)
+        if warn_msg:
+            st.warning(warn_msg)
+        df_work['_norm'] = norm_series
+    else:
+        # Per-group path: seed all rows with global control, then overwrite per-group rows
+        global_ctrl_stats = get_control_stats(src_df, control_wells, param)
+        ctrl_mean = global_ctrl_stats['mean']
+        norm_full, warn_global = apply_normalization(df_work[param], global_ctrl_stats, op_key, minmax_config)
+        if warn_global:
+            st.warning(f'Global control: {warn_global}')
+        df_work['_norm'] = norm_full
+
+        seen_grp: dict = {}
+        for target_well, grp_ctrl_wells in control_map.items():
+            grp_key = tuple(sorted(grp_ctrl_wells))
+            if grp_key not in seen_grp:
+                seen_grp[grp_key] = get_control_stats(src_df, list(grp_ctrl_wells), param)
+            grp_ctrl_stats = seen_grp[grp_key]
+            row_mask = df_work['Source well'] == target_well
+            if not row_mask.any():
+                continue
+            grp_series, warn_grp = apply_normalization(
+                df_work.loc[row_mask, param], grp_ctrl_stats, op_key, minmax_config
+            )
+            if warn_grp:
+                st.warning(f'Group {grp_ctrl_wells} → {target_well}: {warn_grp}')
+            df_work.loc[row_mask, '_norm'] = grp_series.values
 
     raw_stats = compute_well_stats(src_df, param, all_wells)
-
-    df_work = src_df.copy()
-    norm_series, warn_msg = apply_normalization(df_work[param], ctrl_stats, op_key, minmax_config)
-    if warn_msg:
-        st.warning(warn_msg)
-    df_work['_norm'] = norm_series
     norm_stats = compute_well_stats(df_work, '_norm', all_wells)
 
     raw_y  = f"{param} (a.u.)"
@@ -166,18 +192,18 @@ def render_analysis(
     )
 
     if plot_type == 'Bar + 95% CI':
-        raw_fig  = make_bar_figure(raw_stats,  control_well, f'Raw {param}', raw_y)
-        norm_fig = make_bar_figure(norm_stats, control_well,
+        raw_fig  = make_bar_figure(raw_stats,  control_wells, f'Raw {param}', raw_y)
+        norm_fig = make_bar_figure(norm_stats, control_wells,
                                    f'Normalized {param} ({op_label})', norm_y)
     elif plot_type == 'Violin':
-        raw_fig  = make_violin_figure(src_df,   param,   all_wells, control_well,
+        raw_fig  = make_violin_figure(src_df,   param,   all_wells, control_wells,
                                       f'Raw {param}', raw_y)
-        norm_fig = make_violin_figure(df_work, '_norm', all_wells, control_well,
+        norm_fig = make_violin_figure(df_work, '_norm', all_wells, control_wells,
                                       f'Normalized {param} ({op_label})', norm_y)
     else:
-        raw_fig  = make_strip_figure(src_df,   param,   all_wells, control_well,
+        raw_fig  = make_strip_figure(src_df,   param,   all_wells, control_wells,
                                      f'Raw {param}', raw_y)
-        norm_fig = make_strip_figure(df_work, '_norm', all_wells, control_well,
+        norm_fig = make_strip_figure(df_work, '_norm', all_wells, control_wells,
                                      f'Normalized {param} ({op_label})', norm_y)
 
     sub_raw, sub_norm = st.tabs(['Raw Values', 'Normalized Values'])
@@ -185,8 +211,12 @@ def render_analysis(
     with sub_raw:
         m1, m2 = st.columns([1, 5])
         m1.metric('Wells', len(all_wells))
-        m2.metric('Control mean',
-                  f'{ctrl_mean:.4f}' if not np.isnan(ctrl_mean) else 'N/A')
+        ctrl_label = ', '.join(control_wells)
+        m2.metric(
+            'Control mean',
+            f'{ctrl_mean:.4f}' if not np.isnan(ctrl_mean) else 'N/A',
+            help=f'Pooled across: {ctrl_label}',
+        )
         st.plotly_chart(raw_fig, use_container_width=True, height=600)
         _image_dl_buttons(raw_fig, f'{file_stem}_{param}_raw', f'{prefix}_raw_img')
         raw_wide = build_wide_dataframe(src_df, param, all_wells)
@@ -214,6 +244,21 @@ def render_analysis(
                 mime='text/csv',
                 key=f'{prefix}_dl_norm',
             )
+            if control_map:
+                with st.expander('Per-group control statistics'):
+                    grp_rows = []
+                    unique_grp: dict = {}
+                    for tw, cw_list in control_map.items():
+                        k = tuple(sorted(cw_list))
+                        if k not in unique_grp:
+                            unique_grp[k] = get_control_stats(src_df, list(cw_list), param)
+                        gs = unique_grp[k]
+                        grp_rows.append({
+                            'Target well': tw,
+                            'Control well(s)': ', '.join(cw_list),
+                            'Control mean': round(gs['mean'], 4) if not np.isnan(gs['mean']) else 'N/A',
+                        })
+                    st.dataframe(pd.DataFrame(grp_rows), use_container_width=True, hide_index=True)
 
     with st.expander('Well statistics table'):
         summary = raw_stats.rename(columns={
@@ -235,6 +280,18 @@ _sidebar_ready = False
 
 with st.sidebar:
     st.title('🪱 WormNorm')
+    st.markdown('---')
+
+    active_view = st.radio(
+        'Navigation',
+        [
+            'Basic Normalization',
+            'Outlier Removed Normalization',
+            'Sequential Normalization',
+            'Worm Profiles',
+        ],
+        label_visibility='collapsed',
+    )
     st.markdown('---')
 
     # 1. Upload
@@ -370,39 +427,98 @@ with st.sidebar:
             )
         all_wells = [_well_labels[w] for w in all_wells]
 
-        # 6. Control well
-        st.markdown('---')
-        st.subheader('6. Control Well')
-        control_well = st.selectbox('Control well', all_wells)
+        if active_view != 'Sequential Normalization':
+            # 6. Control wells
+            st.markdown('---')
+            st.subheader('6. Control Wells')
+            control_wells = st.multiselect(
+                'Control well(s)',
+                all_wells,
+                default=[all_wells[0]] if all_wells else [],
+                help='Select one or more wells to pool as the normalization baseline.',
+            )
+            if not control_wells:
+                st.warning('Select at least one control well.')
+                st.stop()
 
-        # 7. Normalization
-        st.markdown('---')
-        st.subheader('7. Normalization')
-        op_label = st.selectbox(
-            'Operation vs control',
-            list(OPERATIONS.keys()),
-            index=0,
-        )
-        op_key = OPERATIONS[op_label]
-
-        minmax_min_well = None
-        minmax_max_well = None
-        if op_key == 'minmax':
-            st.markdown('**Min-max reference wells**')
-            mm1, mm2 = st.columns(2)
-            with mm1:
-                minmax_min_well = st.selectbox(
-                    'Min well', all_wells, index=0, key='mm_min_well',
-                    help='Well whose mean is used as the minimum reference.',
+            # Advanced: per-well control mapping
+            control_map = {}  # dict[target_well -> list[ctrl_wells]]
+            with st.expander('Advanced: per-well control mapping (optional)'):
+                st.caption(
+                    'Define groups where specific control well(s) normalize specific target wells. '
+                    'Unmapped wells use the global control well(s) above.'
                 )
-            with mm2:
-                minmax_max_well = st.selectbox(
-                    'Max well', all_wells, index=len(all_wells) - 1, key='mm_max_well',
-                    help='Well whose mean is used as the maximum reference.',
+                n_groups = st.number_input(
+                    'Number of groups', min_value=0, max_value=20,
+                    value=0, step=1, key='n_ctrl_groups',
                 )
+                all_mapped_targets = []
+                for g in range(int(n_groups)):
+                    st.markdown(f'**Group {g + 1}**')
+                    gcol1, gcol2 = st.columns(2)
+                    with gcol1:
+                        grp_ctrl = st.multiselect('Control well(s)', all_wells, key=f'grp_ctrl_{g}')
+                    with gcol2:
+                        grp_targets = st.multiselect('Target well(s)', all_wells, key=f'grp_targets_{g}')
+                    if grp_ctrl and grp_targets:
+                        for tw in grp_targets:
+                            control_map[tw] = grp_ctrl
+                        all_mapped_targets.extend(grp_targets)
 
-        st.markdown('---')
-        st.caption('These settings apply to the Basic, Outlier, and Worm Profiles tabs.')
+                # Warn about wells assigned to multiple groups
+                seen_counts: dict = {}
+                for tw in all_mapped_targets:
+                    seen_counts[tw] = seen_counts.get(tw, 0) + 1
+                dupes = [w for w, c in seen_counts.items() if c > 1]
+                if dupes:
+                    st.warning(
+                        f'These wells appear in multiple groups (last assignment wins): '
+                        f'{", ".join(dupes)}'
+                    )
+                unmapped = [w for w in all_wells if w not in control_map and w not in control_wells]
+                if unmapped and int(n_groups) > 0:
+                    st.caption(
+                        f'{len(unmapped)} well(s) not in any group will use global control: '
+                        f'{", ".join(unmapped)}'
+                    )
+
+            # 7. Normalization
+            st.markdown('---')
+            st.subheader('7. Normalization')
+            op_label = st.selectbox(
+                'Operation vs control',
+                list(OPERATIONS.keys()),
+                index=0,
+            )
+            op_key = OPERATIONS[op_label]
+
+            minmax_min_well = None
+            minmax_max_well = None
+            if op_key == 'minmax':
+                st.markdown('**Min-max reference wells**')
+                mm1, mm2 = st.columns(2)
+                with mm1:
+                    minmax_min_well = st.selectbox(
+                        'Min well', all_wells, index=0, key='mm_min_well',
+                        help='Well whose mean is used as the minimum reference.',
+                    )
+                with mm2:
+                    minmax_max_well = st.selectbox(
+                        'Max well', all_wells, index=len(all_wells) - 1, key='mm_max_well',
+                        help='Well whose mean is used as the maximum reference.',
+                    )
+
+            st.markdown('---')
+            st.caption('These settings apply to the Basic and Outlier tabs.')
+        else:
+            # Provide safe defaults so the rest of the script doesn't crash
+            control_wells = []
+            control_map = {}
+            op_label = 'None (raw values)'
+            op_key = 'none'
+            minmax_min_well = None
+            minmax_max_well = None
+
         _sidebar_ready = True
 
 # ── File stem for exports ─────────────────────────────────────────────────────
@@ -414,31 +530,13 @@ file_stem = (
 
 # ── Main area ─────────────────────────────────────────────────────────────────
 
-st.markdown("""
-<style>
-/* Larger, easier-to-read tab labels */
-.stTabs [data-baseweb="tab"] {
-    font-size: 1.1rem;
-    font-weight: 600;
-    padding: 10px 28px;
-}
-.stTabs [data-baseweb="tab-list"] {
-    gap: 6px;
-}
-</style>
-""", unsafe_allow_html=True)
-
 st.title('WormNorm')
+st.subheader(active_view)
+st.markdown('---')
 
-tab_basic, tab_outlier, tab_profiles = st.tabs([
-    'Basic Normalization',
-    'Outlier Removed Normalization',
-    'Worm Profiles',
-])
+# ── Basic Normalization ───────────────────────────────────────────────────────
 
-# ── Tab 1: Basic Normalization ────────────────────────────────────────────────
-
-with tab_basic:
+if active_view == 'Basic Normalization':
     if not _sidebar_ready:
         st.info('Upload one or more .txt files in the sidebar to use this tab.')
     else:
@@ -446,18 +544,19 @@ with tab_basic:
             src_df=working_df,
             param=param,
             all_wells=all_wells,
-            control_well=control_well,
+            control_wells=control_wells,
             op_key=op_key,
             op_label=op_label,
             minmax_min_well=minmax_min_well,
             minmax_max_well=minmax_max_well,
             file_stem=file_stem,
             prefix='basic',
+            control_map=control_map or None,
         )
 
-# ── Tab 2: Outlier Removed Normalization ─────────────────────────────────────
+# ── Outlier Removed Normalization ────────────────────────────────────────────
 
-with tab_outlier:
+elif active_view == 'Outlier Removed Normalization':
     if not _sidebar_ready:
         st.info('Upload one or more .txt files in the sidebar to use this tab.')
     else:
@@ -519,16 +618,271 @@ with tab_outlier:
             src_df=cleaned_df,
             param=param,
             all_wells=all_wells,
-            control_well=control_well,
+            control_wells=control_wells,
             op_key=op_key,
             op_label=op_label,
             minmax_min_well=minmax_min_well,
             minmax_max_well=minmax_max_well,
             file_stem=file_stem,
             prefix='outlier',
+            control_map=control_map or None,
         )
 
-# ── Tab 3: Worm Profiles ──────────────────────────────────────────────────────
+# ── Sequential Normalization ──────────────────────────────────────────────────
+
+elif active_view == 'Sequential Normalization':
+    if not _sidebar_ready:
+        st.info('Upload one or more .txt files in the sidebar to use this tab.')
+    else:
+        st.caption(
+            'Apply two normalization steps in sequence. '
+            'Step 2 operates on the output of Step 1. '
+            'Each step can use a different parameter and control well selection. '
+            'Reference statistics for Step 2 are always drawn from the raw data.'
+        )
+
+        sc1, sc2 = st.columns(2)
+
+        with sc1:
+            st.markdown('### Step 1')
+            seq_param1 = st.selectbox('Parameter', augmented_cols, key='seq_param1')
+            seq_ctrl1 = st.multiselect(
+                'Control well(s)',
+                all_wells,
+                default=[all_wells[0]] if all_wells else [],
+                key='seq_ctrl1',
+            )
+            seq_op_label1 = st.selectbox('Operation', list(OPERATIONS.keys()), key='seq_op1')
+            seq_op_key1 = OPERATIONS[seq_op_label1]
+
+            seq_map1 = {}
+            with st.expander('Advanced: per-well mapping (optional)'):
+                st.caption('Override the global control for specific target wells.')
+                n_seq1 = st.number_input(
+                    'Number of groups', min_value=0, max_value=20,
+                    value=0, step=1, key='seq1_n_grp',
+                )
+                seq_map1_targets = []
+                for g in range(int(n_seq1)):
+                    st.markdown(f'**Group {g + 1}**')
+                    s1gc = st.multiselect('Control well(s)', all_wells, key=f'seq1_grp_ctrl_{g}')
+                    s1gt = st.multiselect('Target well(s)', all_wells, key=f'seq1_grp_tgt_{g}')
+                    if s1gc and s1gt:
+                        for tw in s1gt:
+                            seq_map1[tw] = s1gc
+                        seq_map1_targets.extend(s1gt)
+                seen1: dict = {}
+                for tw in seq_map1_targets:
+                    seen1[tw] = seen1.get(tw, 0) + 1
+                dupes1 = [w for w, c in seen1.items() if c > 1]
+                if dupes1:
+                    st.warning(f'Duplicate targets (last wins): {", ".join(dupes1)}')
+
+        with sc2:
+            st.markdown('### Step 2')
+            seq_param2 = st.selectbox(
+                'Reference parameter',
+                augmented_cols,
+                key='seq_param2',
+                help='Parameter used to compute the Step 2 reference value from the raw data.',
+            )
+            seq_ctrl2 = st.multiselect(
+                'Control well(s)',
+                all_wells,
+                default=[all_wells[0]] if all_wells else [],
+                key='seq_ctrl2',
+            )
+            seq_op_label2 = st.selectbox('Operation', list(OPERATIONS.keys()), key='seq_op2')
+            seq_op_key2 = OPERATIONS[seq_op_label2]
+
+            seq_map2 = {}
+            with st.expander('Advanced: per-well mapping (optional)'):
+                st.caption('Override the global reference well for specific target wells.')
+                n_seq2 = st.number_input(
+                    'Number of groups', min_value=0, max_value=20,
+                    value=0, step=1, key='seq2_n_grp',
+                )
+                seq_map2_targets = []
+                for g in range(int(n_seq2)):
+                    st.markdown(f'**Group {g + 1}**')
+                    s2gc = st.multiselect('Reference well(s)', all_wells, key=f'seq2_grp_ctrl_{g}')
+                    s2gt = st.multiselect('Target well(s)', all_wells, key=f'seq2_grp_tgt_{g}')
+                    if s2gc and s2gt:
+                        for tw in s2gt:
+                            seq_map2[tw] = s2gc
+                        seq_map2_targets.extend(s2gt)
+                seen2: dict = {}
+                for tw in seq_map2_targets:
+                    seen2[tw] = seen2.get(tw, 0) + 1
+                dupes2 = [w for w, c in seen2.items() if c > 1]
+                if dupes2:
+                    st.warning(f'Duplicate targets (last wins): {", ".join(dupes2)}')
+
+        if not seq_ctrl1 or not seq_ctrl2:
+            st.warning('Select control well(s) for both steps.')
+        else:
+            df_seq = working_df.copy()
+
+            # ── Step 1 ────────────────────────────────────────────────────────
+            seq_ctrl_stats1 = get_control_stats(working_df, seq_ctrl1, seq_param1)
+            seq_norm1_full, seq_warn1_g = apply_normalization(
+                working_df[seq_param1], seq_ctrl_stats1, seq_op_key1, None
+            )
+            if seq_warn1_g:
+                st.warning(f'Step 1 global: {seq_warn1_g}')
+            df_seq['_seq1'] = seq_norm1_full
+
+            if seq_map1:
+                _seen_cs1: dict = {}
+                for tw, cw_list in seq_map1.items():
+                    k = tuple(sorted(cw_list))
+                    if k not in _seen_cs1:
+                        _seen_cs1[k] = get_control_stats(working_df, list(cw_list), seq_param1)
+                    mask = df_seq['Source well'] == tw
+                    if not mask.any():
+                        continue
+                    grp_n, grp_w = apply_normalization(
+                        df_seq.loc[mask, seq_param1], _seen_cs1[k], seq_op_key1, None
+                    )
+                    if grp_w:
+                        st.warning(f'Step 1 → {tw}: {grp_w}')
+                    df_seq.loc[mask, '_seq1'] = grp_n.values
+
+            # ── Step 2 (reference stats always from raw data) ─────────────────
+            seq_ctrl_stats2 = get_control_stats(working_df, seq_ctrl2, seq_param2)
+            seq_norm2_full, seq_warn2_g = apply_normalization(
+                df_seq['_seq1'], seq_ctrl_stats2, seq_op_key2, None
+            )
+            if seq_warn2_g:
+                st.warning(f'Step 2 global: {seq_warn2_g}')
+            df_seq['_seq2'] = seq_norm2_full
+
+            if seq_map2:
+                _seen_cs2: dict = {}
+                for tw, cw_list in seq_map2.items():
+                    k = tuple(sorted(cw_list))
+                    if k not in _seen_cs2:
+                        _seen_cs2[k] = get_control_stats(working_df, list(cw_list), seq_param2)
+                    mask = df_seq['Source well'] == tw
+                    if not mask.any():
+                        continue
+                    grp_n, grp_w = apply_normalization(
+                        df_seq.loc[mask, '_seq1'], _seen_cs2[k], seq_op_key2, None
+                    )
+                    if grp_w:
+                        st.warning(f'Step 2 → {tw}: {grp_w}')
+                    df_seq.loc[mask, '_seq2'] = grp_n.values
+
+            # ── Display ───────────────────────────────────────────────────────
+            seq_stats1 = compute_well_stats(df_seq, '_seq1', all_wells)
+            seq_stats2 = compute_well_stats(df_seq, '_seq2', all_wells)
+
+            step1_y = OPERATION_Y_LABEL.get(seq_op_key1, seq_op_key1).replace('{param}', seq_param1)
+            step2_y = OPERATION_Y_LABEL.get(seq_op_key2, seq_op_key2).replace('{param}', f'Step1({seq_param1})')
+
+            seq_plot_type = st.radio(
+                'Plot type',
+                ['Bar + 95% CI', 'Violin', 'Scatter'],
+                horizontal=True,
+                key='seq_plot_type',
+            )
+
+            tab_s1, tab_s2 = st.tabs(['Step 1 Result', 'Step 2 Result (Final)'])
+
+            with tab_s1:
+                m1, m2 = st.columns([1, 5])
+                m1.metric('Wells', len(all_wells))
+                cm1 = seq_ctrl_stats1['mean']
+                m2.metric(
+                    'Step 1 control mean',
+                    f'{cm1:.4f}' if not np.isnan(cm1) else 'N/A',
+                    help=f'Pooled across: {", ".join(seq_ctrl1)}',
+                )
+                step1_title = f'Step 1: {seq_op_label1}({seq_param1})'
+                if seq_plot_type == 'Bar + 95% CI':
+                    fig_s1 = make_bar_figure(seq_stats1, seq_ctrl1, step1_title, step1_y)
+                elif seq_plot_type == 'Violin':
+                    fig_s1 = make_violin_figure(df_seq, '_seq1', all_wells, seq_ctrl1, step1_title, step1_y)
+                else:
+                    fig_s1 = make_strip_figure(df_seq, '_seq1', all_wells, seq_ctrl1, step1_title, step1_y)
+                st.plotly_chart(fig_s1, use_container_width=True, height=600)
+                _image_dl_buttons(fig_s1, f'{file_stem}_{seq_param1}_{seq_op_key1}_seq1', 'seq_img1')
+                s1_wide = build_wide_dataframe(df_seq, '_seq1', all_wells)
+                s1_wide.columns = all_wells
+                st.download_button(
+                    '⬇ Download Step 1 CSV',
+                    data=to_csv_bytes(s1_wide),
+                    file_name=make_export_filename(file_stem, seq_param1, seq_op_key1, 'seq_step1'),
+                    mime='text/csv',
+                    key='seq_dl1',
+                )
+                if seq_map1 and seq_op_key1 != 'none':
+                    with st.expander('Per-group Step 1 statistics'):
+                        rows = []
+                        uniq: dict = {}
+                        for tw, cw_list in seq_map1.items():
+                            k = tuple(sorted(cw_list))
+                            if k not in uniq:
+                                uniq[k] = get_control_stats(working_df, list(cw_list), seq_param1)
+                            gs = uniq[k]
+                            rows.append({'Target well': tw, 'Control well(s)': ', '.join(cw_list),
+                                         'Control mean': round(gs['mean'], 4) if not np.isnan(gs['mean']) else 'N/A'})
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            with tab_s2:
+                m1, m2 = st.columns([1, 5])
+                m1.metric('Wells', len(all_wells))
+                cm2 = seq_ctrl_stats2['mean']
+                m2.metric(
+                    'Step 2 reference mean',
+                    f'{cm2:.4f}' if not np.isnan(cm2) else 'N/A',
+                    help=f'{seq_param2} pooled across: {", ".join(seq_ctrl2)}',
+                )
+                step2_title = f'Step 2: {seq_op_label2}(Step1, ref={seq_param2})'
+                if seq_plot_type == 'Bar + 95% CI':
+                    fig_s2 = make_bar_figure(seq_stats2, seq_ctrl1, step2_title, step2_y)
+                elif seq_plot_type == 'Violin':
+                    fig_s2 = make_violin_figure(df_seq, '_seq2', all_wells, seq_ctrl1, step2_title, step2_y)
+                else:
+                    fig_s2 = make_strip_figure(df_seq, '_seq2', all_wells, seq_ctrl1, step2_title, step2_y)
+                st.plotly_chart(fig_s2, use_container_width=True, height=600)
+                _image_dl_buttons(fig_s2, f'{file_stem}_{seq_param1}_{seq_op_key1}_{seq_op_key2}_seq2', 'seq_img2')
+                s2_wide = build_wide_dataframe(df_seq, '_seq2', all_wells)
+                s2_wide.columns = all_wells
+                st.download_button(
+                    '⬇ Download Step 2 (Final) CSV',
+                    data=to_csv_bytes(s2_wide),
+                    file_name=make_export_filename(
+                        file_stem, seq_param1, f'{seq_op_key1}_{seq_op_key2}', 'seq_final'
+                    ),
+                    mime='text/csv',
+                    key='seq_dl2',
+                )
+                if seq_map2 and seq_op_key2 != 'none':
+                    with st.expander('Per-group Step 2 statistics'):
+                        rows = []
+                        uniq: dict = {}
+                        for tw, cw_list in seq_map2.items():
+                            k = tuple(sorted(cw_list))
+                            if k not in uniq:
+                                uniq[k] = get_control_stats(working_df, list(cw_list), seq_param2)
+                            gs = uniq[k]
+                            rows.append({'Target well': tw, 'Reference well(s)': ', '.join(cw_list),
+                                         'Reference mean': round(gs['mean'], 4) if not np.isnan(gs['mean']) else 'N/A'})
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            with st.expander('Well statistics table'):
+                s1_summary = seq_stats1.rename(columns={'mean': 'step1_mean', 'ci95': 'step1_ci95'})
+                s2_summary = seq_stats2[['well', 'mean', 'ci95']].rename(
+                    columns={'mean': 'step2_mean', 'ci95': 'step2_ci95'}
+                )
+                st.dataframe(
+                    s1_summary.merge(s2_summary, on='well'),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+# ── Worm Profiles ────────────────────────────────────────────────────────────
 
 def _render_profiles_tab():
     """Profiles tab body; uses return instead of st.stop() so other tabs are unaffected."""
@@ -891,7 +1245,7 @@ def _render_profiles_tab():
             )
 
 
-with tab_profiles:
+if active_view == 'Worm Profiles':
     _render_profiles_tab()
 
 

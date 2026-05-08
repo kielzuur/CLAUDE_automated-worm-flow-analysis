@@ -171,8 +171,10 @@ def get_well_mean(df: pd.DataFrame, well: str, param: str) -> float:
     return float(vals.mean()) if len(vals) > 0 else np.nan
 
 
-def get_control_stats(df: pd.DataFrame, control_well: str, param: str) -> dict:
-    vals = df.loc[df['Source well'] == control_well, param].dropna()
+def get_control_stats(df: pd.DataFrame, control_wells: 'str | list[str]', param: str) -> dict:
+    if isinstance(control_wells, str):
+        control_wells = [control_wells]
+    vals = df.loc[df['Source well'].isin(control_wells), param].dropna()
     if vals.empty:
         return {"mean": np.nan, "min": np.nan, "max": np.nan}
     return {"mean": float(vals.mean()), "min": float(vals.min()), "max": float(vals.max())}
