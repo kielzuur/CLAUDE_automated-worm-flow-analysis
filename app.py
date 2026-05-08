@@ -703,93 +703,137 @@ elif active_view == 'Sequential Normalization':
         with sc1:
             st.markdown('### Step 1')
             seq_param1 = st.selectbox('Parameter', augmented_cols, key='seq_param1')
-            seq_ctrl1 = st.multiselect(
-                'Control well(s)',
-                all_wells,
-                default=[all_wells[0]] if all_wells else [],
-                key='seq_ctrl1',
+
+            seq1_ctrl_mode = st.radio(
+                'Step 1 control mode',
+                ['Single / pooled control', 'Per-well mapping'],
+                horizontal=True, key='seq1_ctrl_mode', label_visibility='collapsed',
             )
             seq_op_label1 = st.selectbox('Operation', list(OPERATIONS.keys()), key='seq_op1')
             seq_op_key1 = OPERATIONS[seq_op_label1]
 
+            seq_ctrl1 = []
             seq_map1 = {}
-            with st.expander('Advanced: per-well mapping (optional)'):
-                st.caption('Override the global control for specific target wells.')
-                n_seq1 = st.number_input(
-                    'Number of groups', min_value=0, max_value=20,
-                    value=0, step=1, key='seq1_n_grp',
+
+            _prev_s1 = st.session_state.get('_prev_seq1_ctrl_mode')
+            if _prev_s1 == 'Per-well mapping' and seq1_ctrl_mode == 'Single / pooled control':
+                _snap = int(st.session_state.get('seq1_n_grp_main', 1))
+                st.session_state['_saved_seq1_n'] = _snap
+                for _g in range(_snap):
+                    st.session_state[f'_saved_seq1_ctrl_{_g}'] = st.session_state.get(f'seq1_main_ctrl_{_g}', [])
+                    st.session_state[f'_saved_seq1_tgt_{_g}'] = st.session_state.get(f'seq1_main_tgt_{_g}', [])
+            elif _prev_s1 == 'Single / pooled control' and seq1_ctrl_mode == 'Per-well mapping':
+                _snap = st.session_state.get('_saved_seq1_n', 1)
+                st.session_state['seq1_n_grp_main'] = _snap
+                for _g in range(_snap):
+                    _sc = st.session_state.get(f'_saved_seq1_ctrl_{_g}')
+                    _st = st.session_state.get(f'_saved_seq1_tgt_{_g}')
+                    if _sc is not None:
+                        st.session_state[f'seq1_main_ctrl_{_g}'] = _sc
+                    if _st is not None:
+                        st.session_state[f'seq1_main_tgt_{_g}'] = _st
+            st.session_state['_prev_seq1_ctrl_mode'] = seq1_ctrl_mode
+
+            if seq1_ctrl_mode == 'Single / pooled control':
+                seq_ctrl1 = st.multiselect(
+                    'Control well(s)', all_wells,
+                    default=[all_wells[0]] if all_wells else [],
+                    key='seq_ctrl1',
                 )
-                seq_map1_targets = []
+            else:
+                st.caption("Each group's control wells normalize its target wells.")
+                n_s1 = st.number_input('Number of groups', min_value=1, max_value=20,
+                                       value=1, step=1, key='seq1_n_grp_main')
+                _s1_all_ctrls: set = set()
+                for _g in range(int(n_s1)):
+                    for _cw in st.session_state.get(f'seq1_main_ctrl_{_g}', []):
+                        _s1_all_ctrls.add(_cw)
+                s1_avail_tgts = [w for w in all_wells if w not in _s1_all_ctrls]
                 _s1_grp_defs = []
-                for g in range(int(n_seq1)):
+                for g in range(int(n_s1)):
                     st.markdown(f'**Group {g + 1}**')
-                    s1gc = st.multiselect('Control well(s)', all_wells, key=f'seq1_grp_ctrl_{g}')
-                    s1gt = st.multiselect('Target well(s)', all_wells, key=f'seq1_grp_tgt_{g}')
+                    s1gc = st.multiselect('Control well(s)', all_wells, key=f'seq1_main_ctrl_{g}')
+                    s1gt = st.multiselect('Target well(s)', s1_avail_tgts, key=f'seq1_main_tgt_{g}')
                     if s1gc and s1gt:
                         for tw in s1gt:
                             seq_map1[tw] = s1gc
-                        seq_map1_targets.extend(s1gt)
                         _s1_grp_defs.append(s1gc)
-
                 for _gc in _s1_grp_defs:
                     for cw in _gc:
                         if cw not in seq_map1:
                             seq_map1[cw] = _gc
-
-                seen1: dict = {}
-                for tw in seq_map1_targets:
-                    seen1[tw] = seen1.get(tw, 0) + 1
-                dupes1 = [w for w, c in seen1.items() if c > 1]
-                if dupes1:
-                    st.warning(f'Duplicate targets (last wins): {", ".join(dupes1)}')
+                seq_ctrl1 = list({cw for _gc in _s1_grp_defs for cw in _gc})
+                if not seq_ctrl1:
+                    st.caption('Define at least one group to enable Step 1 normalization.')
 
         with sc2:
             st.markdown('### Step 2')
             seq_param2 = st.selectbox(
-                'Reference parameter',
-                augmented_cols,
-                key='seq_param2',
+                'Reference parameter', augmented_cols, key='seq_param2',
                 help='Parameter used to compute the Step 2 reference value from the raw data.',
             )
-            seq_ctrl2 = st.multiselect(
-                'Control well(s)',
-                all_wells,
-                default=[all_wells[0]] if all_wells else [],
-                key='seq_ctrl2',
+
+            seq2_ctrl_mode = st.radio(
+                'Step 2 control mode',
+                ['Single / pooled control', 'Per-well mapping'],
+                horizontal=True, key='seq2_ctrl_mode', label_visibility='collapsed',
             )
             seq_op_label2 = st.selectbox('Operation', list(OPERATIONS.keys()), key='seq_op2')
             seq_op_key2 = OPERATIONS[seq_op_label2]
 
+            seq_ctrl2 = []
             seq_map2 = {}
-            with st.expander('Advanced: per-well mapping (optional)'):
-                st.caption('Override the global reference well for specific target wells.')
-                n_seq2 = st.number_input(
-                    'Number of groups', min_value=0, max_value=20,
-                    value=0, step=1, key='seq2_n_grp',
+
+            _prev_s2 = st.session_state.get('_prev_seq2_ctrl_mode')
+            if _prev_s2 == 'Per-well mapping' and seq2_ctrl_mode == 'Single / pooled control':
+                _snap = int(st.session_state.get('seq2_n_grp_main', 1))
+                st.session_state['_saved_seq2_n'] = _snap
+                for _g in range(_snap):
+                    st.session_state[f'_saved_seq2_ctrl_{_g}'] = st.session_state.get(f'seq2_main_ctrl_{_g}', [])
+                    st.session_state[f'_saved_seq2_tgt_{_g}'] = st.session_state.get(f'seq2_main_tgt_{_g}', [])
+            elif _prev_s2 == 'Single / pooled control' and seq2_ctrl_mode == 'Per-well mapping':
+                _snap = st.session_state.get('_saved_seq2_n', 1)
+                st.session_state['seq2_n_grp_main'] = _snap
+                for _g in range(_snap):
+                    _sc = st.session_state.get(f'_saved_seq2_ctrl_{_g}')
+                    _st = st.session_state.get(f'_saved_seq2_tgt_{_g}')
+                    if _sc is not None:
+                        st.session_state[f'seq2_main_ctrl_{_g}'] = _sc
+                    if _st is not None:
+                        st.session_state[f'seq2_main_tgt_{_g}'] = _st
+            st.session_state['_prev_seq2_ctrl_mode'] = seq2_ctrl_mode
+
+            if seq2_ctrl_mode == 'Single / pooled control':
+                seq_ctrl2 = st.multiselect(
+                    'Reference well(s)', all_wells,
+                    default=[all_wells[0]] if all_wells else [],
+                    key='seq_ctrl2',
                 )
-                seq_map2_targets = []
+            else:
+                st.caption("Each group's reference wells are used as the Step 2 baseline.")
+                n_s2 = st.number_input('Number of groups', min_value=1, max_value=20,
+                                       value=1, step=1, key='seq2_n_grp_main')
+                _s2_all_ctrls: set = set()
+                for _g in range(int(n_s2)):
+                    for _cw in st.session_state.get(f'seq2_main_ctrl_{_g}', []):
+                        _s2_all_ctrls.add(_cw)
+                s2_avail_tgts = [w for w in all_wells if w not in _s2_all_ctrls]
                 _s2_grp_defs = []
-                for g in range(int(n_seq2)):
+                for g in range(int(n_s2)):
                     st.markdown(f'**Group {g + 1}**')
-                    s2gc = st.multiselect('Reference well(s)', all_wells, key=f'seq2_grp_ctrl_{g}')
-                    s2gt = st.multiselect('Target well(s)', all_wells, key=f'seq2_grp_tgt_{g}')
+                    s2gc = st.multiselect('Reference well(s)', all_wells, key=f'seq2_main_ctrl_{g}')
+                    s2gt = st.multiselect('Target well(s)', s2_avail_tgts, key=f'seq2_main_tgt_{g}')
                     if s2gc and s2gt:
                         for tw in s2gt:
                             seq_map2[tw] = s2gc
-                        seq_map2_targets.extend(s2gt)
                         _s2_grp_defs.append(s2gc)
-
                 for _gc in _s2_grp_defs:
                     for cw in _gc:
                         if cw not in seq_map2:
                             seq_map2[cw] = _gc
-
-                seen2: dict = {}
-                for tw in seq_map2_targets:
-                    seen2[tw] = seen2.get(tw, 0) + 1
-                dupes2 = [w for w, c in seen2.items() if c > 1]
-                if dupes2:
-                    st.warning(f'Duplicate targets (last wins): {", ".join(dupes2)}')
+                seq_ctrl2 = list({cw for _gc in _s2_grp_defs for cw in _gc})
+                if not seq_ctrl2:
+                    st.caption('Define at least one group to enable Step 2 normalization.')
 
         if not seq_ctrl1 or not seq_ctrl2:
             st.warning('Select control well(s) for both steps.')
