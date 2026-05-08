@@ -274,6 +274,311 @@ def render_analysis(
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
 
+# ── Help dialog ──────────────────────────────────────────────────────────────
+
+@st.dialog('How to Use WormNorm', width='large')
+def _show_help():
+    st.markdown("""
+## Overview
+
+**WormNorm** is a browser-based tool for analyzing and normalizing flow cytometry
+data from **COPAS** (Complex Object Parametric Analyzer and Sorter) worm sorters.
+It reads raw per-worm measurements exported by the COPAS instrument software,
+lets you define control wells, apply one or more normalization strategies, remove
+outliers, and export results — without writing any code.
+
+---
+
+## Input Data Format
+
+### Standard run files
+WormNorm reads **tab-separated `.txt` files** produced by the COPAS instrument
+software (Union Biometrica). Each file must:
+
+- Begin with a header row whose first column is `Id`
+- Contain a `Source well` column (e.g. `A1`, `B3`) identifying which plate well
+  each worm came from
+- Have one or more numeric measurement columns (e.g. `Green`, `Red`, `TOF`,
+  `Extinction`, pulse-height/width/count variants)
+
+Each data row represents one worm event. Instrument-generated footer text and any
+rows whose first field is not a number are stripped automatically.
+
+**Recognized measurement columns** (shown at the top of the Parameter dropdown
+in preferred order):
+
+| Column | Meaning |
+|---|---|
+| Green / Blue / Yellow / Red | Total fluorescence intensity per channel |
+| TOF | Time of flight — proxy for body length |
+| Extinction | Optical extinction — proxy for body width / optical density |
+| PH Green/Blue/… | Peak height per channel |
+| PW Green/Blue/… | Peak width per channel |
+| PC Green/Blue/… | Peak count per channel |
+
+Any other numeric columns in the file also appear in the parameter list.
+
+### Profile files (Worm Profiles view only)
+Profile files are a separate export from the COPAS software. They are
+**wide-format** tab-separated files where:
+
+- Each **column** is one worm event (identified by event ID)
+- Each **row** is one measurement position along the worm body
+
+Upload one file per fluorescence channel. Up to four channels are supported.
+
+**Enabling profile saving on the COPAS instrument:**
+In the COPAS software, go to **Setup → Data Storage Options** and check the
+following boxes before your run:
+
+- **Store profiles in text format** — enables profile file export
+- **Store each channel in separate file** — required so each channel can be
+  uploaded independently in WormNorm
+- **Store oriented profiles** *(when applicable)* — saves profiles with a
+  consistent head-to-tail orientation
+
+---
+
+## Sidebar — Setup Steps
+
+Work through the sidebar **top-to-bottom** before switching between views. All
+settings are shared across the Basic, Outlier Removed, and Worm Profiles views.
+
+### Step 1 — Upload Files
+Click **Browse files** or drag one or more `.txt` files onto the upload box. The app
+parses and caches each file immediately. Re-uploading the same file byte-for-byte
+is free (served from cache).
+
+### Step 2 — File Selection
+Appears only when more than one file is uploaded.
+
+- **Select a single file** to analyze it on its own.
+- **Combine all files** to pool all runs into one dataset. In combined mode, well
+  names are prefixed with the first 20 characters of the file stem
+  (e.g. `run1/A1`, `run2/A1`), so wells from different files remain distinct.
+  Only parameters present in **all** files are available for analysis.
+
+### Step 3 — Parameter
+Select the channel or morphology parameter to analyze. Parameters are sorted by
+the preferred order above; any additional numeric columns follow alphabetically.
+
+**Parameter Math (optional):** Expand the collapsible section to create a derived
+parameter on the fly by combining any two existing parameters with ÷, −, ×, or +.
+Give the result a name (e.g. `Green/TOF`) and it appears at the top of the
+parameter list. This is useful for size-correcting fluorescence by dividing by TOF
+before normalization.
+
+### Step 4 — Spacer Wells
+Some plate layouts use structurally empty "spacer" wells that should not be
+analyzed. Select the pattern that matches your plate:
+
+| Layout option | Wells excluded |
+|---|---|
+| No spacers (use all wells) | None |
+| Even columns are spacers | Columns 2, 4, 6, 8, … |
+| Odd columns are spacers | Columns 1, 3, 5, 7, … |
+| Two filled, one spacer (cols 3, 6, 9…) | Every third column |
+
+### Step 5 — Well Labels
+Optionally rename wells for display in all plots and tables. Expand the section and
+type a label next to each well ID (e.g. rename `A1` → `N2 control`). Labels are
+cosmetic only — the underlying data and well IDs are unchanged. Useful for
+publication figures.
+
+### Step 6 — Control Wells
+Designates which well(s) serve as the normalization baseline. Two modes:
+
+**Single / pooled control**
+Pick one or more wells from the multiselect. All selected wells are pooled
+together (their event-level values concatenated) to compute a single baseline
+mean that is used for every well in the plate.
+
+**Per-well mapping**
+Assign different control wells to different subsets of experimental wells.
+Click the *+* button to add groups; each group specifies its own control well(s)
+and the target wells that will be normalized against them. Wells not assigned to
+any group automatically fall back to the pooled mean of all defined control
+wells. Useful when a plate has multiple internal controls (e.g. a different
+strain per row).
+
+> This section is hidden in the **Sequential Normalization** view because
+> each step there has its own independent control configuration.
+
+### Step 7 — Normalization Operation
+Chooses how each per-worm value is expressed relative to the control mean. The
+operation is applied to **every individual worm event** before summary statistics
+(mean, CI) are computed per well.
+
+| Operation | Per-event formula | When to use |
+|---|---|---|
+| None (raw values) | x | Inspect raw data, no normalization needed |
+| Subtract control mean | x − μ_ctrl | Remove a constant additive background |
+| Divide by control mean | x / μ_ctrl | Ratio to control; value of 1.0 = control level |
+| Percent change from control | (x − μ_ctrl) / μ_ctrl × 100 | Intuitive effect size; 0% = no change |
+| Log₂ ratio vs control | log₂(x / μ_ctrl) | Fold-change on a symmetric log scale; 0 = no change, +1 = doubled |
+| Min-max (control range) | (x − μ_min) / (μ_max − μ_min) | Scale between two biological extremes (0 = min well, 1 = max well) |
+| Multiply by control mean | x × μ_ctrl | Specialized multiplicative corrections |
+| Add control mean | x + μ_ctrl | Specialized additive corrections |
+
+**Min-max** requires two additional wells: one whose mean defines 0 (the "min"
+reference) and one whose mean defines 1 (the "max" reference). These can be any
+two wells on the plate — they do not have to be the same as the control wells
+selected in Step 6.
+
+---
+
+## Analysis Views
+
+### Basic Normalization
+The standard end-to-end workflow.
+
+1. Configure the sidebar (Steps 1–7).
+2. Choose a **plot type** at the top of the main area:
+   - **Bar + 95% CI** — mean bar per well with error bars (1.96 × SEM); best for
+     comparing population means across many wells.
+   - **Violin** — full distribution shape per well; best for seeing bimodal or
+     skewed populations.
+   - **Scatter** — individual worm events as dots per well; best for spotting
+     outliers or sparse data.
+3. The **Raw Values** sub-tab shows the unmodified channel values.
+4. The **Normalized Values** sub-tab shows the result of the chosen operation.
+5. The **Well statistics table** expander (bottom) shows the exact per-well mean,
+   95% CI half-width, and event count used to draw the bar chart.
+6. Control wells are always **highlighted in orange** across all plot types.
+
+### Outlier Removed Normalization
+Identical to Basic Normalization but with a statistical outlier-removal pass
+applied to the raw data **before** normalization. Outliers are identified and
+removed **per well independently** — removing a worm from one well has no effect
+on any other well.
+
+**Step 1 — Choose an outlier removal method:**
+
+| Method | Logic | Key setting |
+|---|---|---|
+| Z-score | Flag events where \|z-score\| > threshold (z computed within each well) | Threshold (default **3.0**); lower = more aggressive |
+| IQR | Flag events outside the range Q1 − k·IQR to Q3 + k·IQR | Multiplier k (default **1.5**); Tukey's standard; lower = more aggressive |
+| Percentile cutoff | Flag events below the lower percentile or above the upper percentile | Lower % (default 2.5), upper % (default 97.5) |
+| ROUT | Iterative robust outlier test (Motulsky & Brown 2006); matches GraphPad Prism's ROUT method | Max FDR Q (default **1%**); lower = more stringent |
+
+A summary table after removal shows, per well: events before, events after, number
+removed, and percent removed.
+
+**Step 2 — Normalization** operates on the cleaned dataset exactly as in Basic
+Normalization.
+
+### Sequential Normalization
+Applies **two normalization steps in series**. Step 2 operates on the numerical
+output of Step 1, but its reference statistics (the control mean used in Step 2)
+are always drawn from the **original raw data** — not the Step 1 output. This
+means the two steps are mathematically independent in their reference values.
+
+Both Step 1 and Step 2 have their own:
+- Parameter selection (can be different channels)
+- Control mode (single/pooled or per-well mapping)
+- Normalization operation
+
+**Typical use case — size-corrected percent change:**
+1. Step 1: Divide Green by TOF → size-normalized fluorescence
+2. Step 2: Percent change from control → express size-corrected fluorescence
+   relative to the N2 wild-type wells
+
+Results are shown in two tabs: **Step 1 Result** and **Step 2 Result (Final)**.
+Both can be downloaded as CSVs independently.
+
+### Worm Profiles
+Visualizes the spatially-resolved fluorescence **profile** of individual worms —
+the raw intensity measured at each position along the worm body as it passes
+through the laser beam.
+
+**Setup:**
+1. Load a standard run `.txt` file in the sidebar (for well assignments and TOF).
+2. In the main area, upload 1–4 **profile `.txt` files** — one per channel.
+3. Assign each channel a short label and a display color.
+
+**Shared controls (above the sub-tabs):**
+- **Source well** — which well's worms to display
+- **Max events** — maximum worms rendered in heatmaps (reduces rendering time for
+  large wells; worms are randomly sampled if the well exceeds this cap)
+- **X start / X end** — crop the body-position axis (useful to focus on the head,
+  gut, or tail)
+
+**Sub-tabs:**
+
+| Sub-tab | Description |
+|---|---|
+| **Single Heatmap** | One channel at a time. Each row is one worm, sorted by TOF (body length). The X-axis is the position along the body; color encodes intensity. Adjust the color-scale min/max per channel to improve contrast. |
+| **Multi-Channel Heatmap** | All channels shown as side-by-side heatmaps for the same well, with worms aligned by event ID across channels. |
+| **Overlay Heatmap** | Channels blended additively in RGB (fluorescence-microscopy-style composite). Set each channel's min/max to control its contribution to the composite. Black background is recommended for additive blending. |
+| **Line Profiles** | Mean ± 95% CI intensity along the worm body, with all channels overlaid as colored lines. Optional per-channel 0–1 normalization for comparing profile shapes regardless of absolute intensity. |
+
+**Auto-update vs manual update:** The "Auto-update plot" checkbox is on by default.
+Uncheck it and use the **Update plot** button if rendering is slow — the chart will
+only re-render when you explicitly request it.
+
+---
+
+## Exporting Results
+
+### Charts
+Every plot has an **⬇ HTML + image export** button. This downloads a standalone
+HTML file containing the interactive Plotly chart plus built-in download buttons for:
+- **PNG** — raster image (2× scale, 1400 × 900 px default)
+- **SVG** — vector image, scalable for print
+- **JPEG** — smaller file size
+- **PDF** — via the browser's Print → Save as PDF function
+
+No additional software (e.g. kaleido) is required to export images from the HTML
+file — all rendering happens in your browser.
+
+### Data tables
+- **⬇ Download raw wide CSV** — one column per well, one row per worm event.
+  Shorter wells are NaN-padded to match the longest well.
+- **⬇ Download normalized wide CSV** — same structure but with normalized values.
+- **⬇ Download Step 1 / Step 2 CSV** (Sequential view) — intermediate and final
+  normalized values.
+- **⬇ Download matrix CSV** (Profiles → Single Heatmap) — the raw intensity matrix
+  (rows = body positions, columns = event IDs) for the selected channel and well.
+- **⬇ Download line profile stats CSV** (Profiles → Line Profiles) — per-position
+  mean and 95% CI for each channel.
+
+CSV filenames are auto-generated from the source file name, parameter, and
+operation (e.g. `myrun_Green_pct_change_basic_normalized.csv`).
+
+---
+
+## Tips & Common Workflows
+
+**Size-correcting fluorescence before normalization**
+Open *Parameter Math* in Step 3, set A = `Green`, operation = ÷, B = `TOF`, name =
+`Green/TOF`. Select `Green/TOF` as the parameter. In Step 7, choose Percent change
+from control. This gives you size-corrected, control-normalized fluorescence in one
+pass — or use Sequential Normalization for a two-step approach.
+
+**Multiple internal controls on one plate**
+Use *Per-well mapping* in Step 6. Create one group per control strain, assign the
+relevant experimental wells as targets for each group. Wells with no group
+assignment are normalized to the pooled mean of all defined controls.
+
+**Comparing multiple plates / runs**
+Upload all files, tick *Combine all files* in Step 2. In combined mode each well is
+labeled `filestem/A1`, so wells from different plates are kept separate. You can
+still select a single control well from one plate as the global baseline.
+
+**Getting a quick QC look**
+Select *None (raw values)* in Step 7. Go to **Outlier Removed Normalization** and
+use the *Percentile cutoff* method with 1st–99th percentiles to trim only the most
+extreme events. Compare the removal summary table to spot wells with unusually high
+dropout rates.
+
+**Comparing profile shapes across channels**
+In Worm Profiles → Line Profiles, check *Normalize each channel independently
+(0–1)*. This rescales each channel to its own 1st–99th percentile range, so you
+can compare the spatial pattern (e.g. head-localized vs. gut-localized) regardless
+of the absolute intensity differences between channels.
+""")
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 _sidebar_ready = False
@@ -292,6 +597,8 @@ with st.sidebar:
         ],
         label_visibility='collapsed',
     )
+    if st.button('📖 How to Use WormNorm', use_container_width=True):
+        _show_help()
     st.markdown('---')
 
     # 1. Upload
@@ -1364,7 +1671,6 @@ def _render_profiles_tab():
 
 if active_view == 'Worm Profiles':
     _render_profiles_tab()
-
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────
