@@ -431,41 +431,96 @@ with st.sidebar:
             # 6. Control wells
             st.markdown('---')
             st.subheader('6. Control Wells')
-            control_wells = st.multiselect(
-                'Control well(s)',
-                all_wells,
-                default=[all_wells[0]] if all_wells else [],
-                help='Select one or more wells to pool as the normalization baseline.',
-            )
-            if not control_wells:
-                st.warning('Select at least one control well.')
-                st.stop()
 
-            # Advanced: per-well control mapping
-            control_map = {}  # dict[target_well -> list[ctrl_wells]]
-            with st.expander('Advanced: per-well control mapping (optional)'):
+            ctrl_mode = st.radio(
+                'Control mode',
+                ['Single / pooled control', 'Per-well mapping'],
+                horizontal=True,
+                key='ctrl_mode',
+                label_visibility='collapsed',
+            )
+
+            control_wells = []
+            control_map = {}
+
+            # Preserve per-well mapping config across mode switches.
+            # Streamlit clears widget keys when their widgets aren't rendered, so we
+            # save to non-widget keys on the way out and restore on the way back in.
+            _prev_ctrl_mode = st.session_state.get('_prev_ctrl_mode')
+            if _prev_ctrl_mode == 'Per-well mapping' and ctrl_mode == 'Single / pooled control':
+                # Switching away: snapshot group config before widget keys get wiped
+                _snap_n = int(st.session_state.get('n_ctrl_groups', 1))
+                st.session_state['_saved_n_ctrl_groups'] = _snap_n
+                for _g in range(_snap_n):
+                    st.session_state[f'_saved_grp_ctrl_{_g}'] = st.session_state.get(f'grp_ctrl_{_g}', [])
+                    st.session_state[f'_saved_grp_targets_{_g}'] = st.session_state.get(f'grp_targets_{_g}', [])
+            elif _prev_ctrl_mode == 'Single / pooled control' and ctrl_mode == 'Per-well mapping':
+                # Switching back: inject saved values into widget keys before they render
+                _snap_n = st.session_state.get('_saved_n_ctrl_groups', 1)
+                st.session_state['n_ctrl_groups'] = _snap_n
+                for _g in range(_snap_n):
+                    _sc = st.session_state.get(f'_saved_grp_ctrl_{_g}')
+                    _st = st.session_state.get(f'_saved_grp_targets_{_g}')
+                    if _sc is not None:
+                        st.session_state[f'grp_ctrl_{_g}'] = _sc
+                    if _st is not None:
+                        st.session_state[f'grp_targets_{_g}'] = _st
+            st.session_state['_prev_ctrl_mode'] = ctrl_mode
+
+            if ctrl_mode == 'Single / pooled control':
+                control_wells = st.multiselect(
+                    'Control well(s)',
+                    all_wells,
+                    default=[all_wells[0]] if all_wells else [],
+                    help='Select one or more wells to pool as the normalization baseline.',
+                )
+                if not control_wells:
+                    st.warning('Select at least one control well.')
+                    st.stop()
+
+            else:
+                # Per-well mapping — no global control required
                 st.caption(
-                    'Define groups where specific control well(s) normalize specific target wells. '
-                    'Unmapped wells use the global control well(s) above.'
+                    'Each group\'s control wells normalize its target wells. '
+                    'Wells not in any group use the pooled control across all groups as fallback.'
                 )
                 n_groups = st.number_input(
-                    'Number of groups', min_value=0, max_value=20,
-                    value=0, step=1, key='n_ctrl_groups',
+                    'Number of groups', min_value=1, max_value=20,
+                    value=1, step=1, key='n_ctrl_groups',
                 )
+
+                # Pre-collect all control wells selected across groups to exclude from target options
+                _all_grp_ctrls: set = set()
+                for _g in range(int(n_groups)):
+                    for _cw in st.session_state.get(f'grp_ctrl_{_g}', []):
+                        _all_grp_ctrls.add(_cw)
+                available_targets = [w for w in all_wells if w not in _all_grp_ctrls]
+
                 all_mapped_targets = []
+                _grp_defs = []
                 for g in range(int(n_groups)):
                     st.markdown(f'**Group {g + 1}**')
                     gcol1, gcol2 = st.columns(2)
                     with gcol1:
                         grp_ctrl = st.multiselect('Control well(s)', all_wells, key=f'grp_ctrl_{g}')
                     with gcol2:
-                        grp_targets = st.multiselect('Target well(s)', all_wells, key=f'grp_targets_{g}')
+                        grp_targets = st.multiselect('Target well(s)', available_targets, key=f'grp_targets_{g}')
                     if grp_ctrl and grp_targets:
                         for tw in grp_targets:
                             control_map[tw] = grp_ctrl
                         all_mapped_targets.extend(grp_targets)
+                        _grp_defs.append(grp_ctrl)
 
-                # Warn about wells assigned to multiple groups
+                # Auto-include each group's control wells as targets of their own group
+                for _gc in _grp_defs:
+                    for cw in _gc:
+                        if cw not in control_map:
+                            control_map[cw] = _gc
+
+                # Fallback control = union of all defined control wells
+                control_wells = list({cw for _gc in _grp_defs for cw in _gc})
+
+                # Warn about duplicate target assignments
                 seen_counts: dict = {}
                 for tw in all_mapped_targets:
                     seen_counts[tw] = seen_counts.get(tw, 0) + 1
@@ -475,12 +530,14 @@ with st.sidebar:
                         f'These wells appear in multiple groups (last assignment wins): '
                         f'{", ".join(dupes)}'
                     )
-                unmapped = [w for w in all_wells if w not in control_map and w not in control_wells]
-                if unmapped and int(n_groups) > 0:
+                unmapped = [w for w in all_wells if w not in control_map]
+                if unmapped and control_wells:
                     st.caption(
-                        f'{len(unmapped)} well(s) not in any group will use global control: '
+                        f'{len(unmapped)} well(s) not in any group use pooled fallback: '
                         f'{", ".join(unmapped)}'
                     )
+                elif not control_wells:
+                    st.caption('Define at least one group with control and target wells to enable normalization.')
 
             # 7. Normalization
             st.markdown('---')
@@ -663,6 +720,7 @@ elif active_view == 'Sequential Normalization':
                     value=0, step=1, key='seq1_n_grp',
                 )
                 seq_map1_targets = []
+                _s1_grp_defs = []
                 for g in range(int(n_seq1)):
                     st.markdown(f'**Group {g + 1}**')
                     s1gc = st.multiselect('Control well(s)', all_wells, key=f'seq1_grp_ctrl_{g}')
@@ -671,6 +729,13 @@ elif active_view == 'Sequential Normalization':
                         for tw in s1gt:
                             seq_map1[tw] = s1gc
                         seq_map1_targets.extend(s1gt)
+                        _s1_grp_defs.append(s1gc)
+
+                for _gc in _s1_grp_defs:
+                    for cw in _gc:
+                        if cw not in seq_map1:
+                            seq_map1[cw] = _gc
+
                 seen1: dict = {}
                 for tw in seq_map1_targets:
                     seen1[tw] = seen1.get(tw, 0) + 1
@@ -703,6 +768,7 @@ elif active_view == 'Sequential Normalization':
                     value=0, step=1, key='seq2_n_grp',
                 )
                 seq_map2_targets = []
+                _s2_grp_defs = []
                 for g in range(int(n_seq2)):
                     st.markdown(f'**Group {g + 1}**')
                     s2gc = st.multiselect('Reference well(s)', all_wells, key=f'seq2_grp_ctrl_{g}')
@@ -711,6 +777,13 @@ elif active_view == 'Sequential Normalization':
                         for tw in s2gt:
                             seq_map2[tw] = s2gc
                         seq_map2_targets.extend(s2gt)
+                        _s2_grp_defs.append(s2gc)
+
+                for _gc in _s2_grp_defs:
+                    for cw in _gc:
+                        if cw not in seq_map2:
+                            seq_map2[cw] = _gc
+
                 seen2: dict = {}
                 for tw in seq_map2_targets:
                     seen2[tw] = seen2.get(tw, 0) + 1
